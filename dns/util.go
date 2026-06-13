@@ -11,6 +11,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/picker"
 	"github.com/metacubex/mihomo/component/ech/echparser"
+	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/log"
 
@@ -390,6 +391,21 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 				// currently, cache indicates whether this msg was from a RCode client,
 				// so we would ignore RCode errors from RCode clients.
 				return nil, errors.New("server failure: " + D.RcodeToString[m.Rcode])
+			}
+			if len(m.Answer) > 0 {
+				var resolvedIP string
+				for _, ans := range m.Answer {
+					if a, ok := ans.(*D.A); ok {
+						resolvedIP = a.A.String()
+						break
+					} else if aaaa, ok := ans.(*D.AAAA); ok {
+						resolvedIP = aaaa.AAAA.String()
+						break
+					}
+				}
+				if resolvedIP != "" {
+					constant.ResolvedIPToDNS.Set(resolvedIP, client.Address())
+				}
 			}
 			log.Debugln("[DNS] %s --> %s from %s", domain, msgToLogString(m), client.Address())
 			return m, nil

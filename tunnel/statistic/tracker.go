@@ -31,6 +31,7 @@ type TrackerInfo struct {
 	ProviderChain C.Chain      `json:"providerChains"`
 	Rule          string       `json:"rule"`
 	RulePayload   string       `json:"rulePayload"`
+	DNSServer     string       `json:"dnsServer,omitempty"`
 }
 
 type tcpTracker struct {
@@ -46,6 +47,11 @@ func (tt *tcpTracker) ID() string {
 }
 
 func (tt *tcpTracker) Info() *TrackerInfo {
+	if tt.TrackerInfo.Metadata.DstIP.IsValid() {
+		if server, ok := C.ResolvedIPToDNS.Get(tt.TrackerInfo.Metadata.DstIP.String()); ok {
+			tt.TrackerInfo.DNSServer = server
+		}
+	}
 	return tt.TrackerInfo
 }
 
@@ -166,6 +172,11 @@ func (ut *udpTracker) ID() string {
 }
 
 func (ut *udpTracker) Info() *TrackerInfo {
+	if ut.TrackerInfo.Metadata.DstIP.IsValid() {
+		if server, ok := C.ResolvedIPToDNS.Get(ut.TrackerInfo.Metadata.DstIP.String()); ok {
+			ut.TrackerInfo.DNSServer = server
+		}
+	}
 	return ut.TrackerInfo
 }
 
