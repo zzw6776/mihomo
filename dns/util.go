@@ -393,18 +393,12 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 				return nil, errors.New("server failure: " + D.RcodeToString[m.Rcode])
 			}
 			if len(m.Answer) > 0 {
-				var resolvedIP string
 				for _, ans := range m.Answer {
 					if a, ok := ans.(*D.A); ok {
-						resolvedIP = a.A.String()
-						break
+						constant.ResolvedIPToDNS.Set(a.A.String(), client.Address())
 					} else if aaaa, ok := ans.(*D.AAAA); ok {
-						resolvedIP = aaaa.AAAA.String()
-						break
+						constant.ResolvedIPToDNS.Set(aaaa.AAAA.String(), client.Address())
 					}
-				}
-				if resolvedIP != "" {
-					constant.ResolvedIPToDNS.Set(resolvedIP, client.Address())
 				}
 			}
 			log.Debugln("[DNS] %s --> %s from %s", domain, msgToLogString(m), client.Address())

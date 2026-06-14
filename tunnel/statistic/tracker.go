@@ -10,6 +10,7 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/component/mmdb"
 
 	"github.com/gofrs/uuid/v5"
 )
@@ -50,6 +51,9 @@ func (tt *tcpTracker) Info() *TrackerInfo {
 	if tt.TrackerInfo.Metadata.DstIP.IsValid() {
 		if server, ok := C.ResolvedIPToDNS.Get(tt.TrackerInfo.Metadata.DstIP.String()); ok {
 			tt.TrackerInfo.DNSServer = server
+		}
+		if len(tt.TrackerInfo.Metadata.DstGeoIP) == 0 {
+			tt.TrackerInfo.Metadata.DstGeoIP = mmdb.IPInstance().LookupCode(tt.TrackerInfo.Metadata.DstIP.AsSlice())
 		}
 	}
 	return tt.TrackerInfo
@@ -175,6 +179,9 @@ func (ut *udpTracker) Info() *TrackerInfo {
 	if ut.TrackerInfo.Metadata.DstIP.IsValid() {
 		if server, ok := C.ResolvedIPToDNS.Get(ut.TrackerInfo.Metadata.DstIP.String()); ok {
 			ut.TrackerInfo.DNSServer = server
+		}
+		if len(ut.TrackerInfo.Metadata.DstGeoIP) == 0 {
+			ut.TrackerInfo.Metadata.DstGeoIP = mmdb.IPInstance().LookupCode(ut.TrackerInfo.Metadata.DstIP.AsSlice())
 		}
 	}
 	return ut.TrackerInfo

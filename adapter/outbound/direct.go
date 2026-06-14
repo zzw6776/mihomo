@@ -25,6 +25,12 @@ func (d *Direct) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn,
 	if err := d.loopBack.CheckConn(metadata); err != nil {
 		return nil, err
 	}
+	if (!metadata.Resolved() || resolver.DirectHostResolver != resolver.DefaultResolver) && metadata.Host != "" {
+		ip, err := resolveIPWithResolver(ctx, metadata.Host, d.prefer, resolver.DirectHostResolver)
+		if err == nil {
+			metadata.DstIP = ip
+		}
+	}
 	opts := d.DialOptions()
 	opts = append(opts, dialer.WithResolver(resolver.DirectHostResolver))
 	c, err := dialer.DialContext(ctx, "tcp", metadata.RemoteAddress(), opts...)
