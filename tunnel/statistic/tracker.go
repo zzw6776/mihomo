@@ -9,8 +9,9 @@ import (
 	"github.com/metacubex/mihomo/common/buf"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
-	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/component/mmdb"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/gofrs/uuid/v5"
 )
@@ -159,6 +160,10 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		t.TrackerInfo.RulePayload = rule.Payload()
 	}
 
+	log.Debugln("[RuleTrace] tracker tcp id=%s host=%q dstIP=%s chain=%s rule=%q payload=%q specialProxy=%q specialRules=%q type=%s push=%t",
+		t.ID(), metadata.Host, metadata.DstIP.String(), t.TrackerInfo.Chain.String(), t.TrackerInfo.Rule,
+		t.TrackerInfo.RulePayload, metadata.SpecialProxy, metadata.SpecialRules, metadata.Type.String(), pushToManager)
+
 	manager.Join(t)
 	return t
 }
@@ -258,6 +263,10 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 		ut.TrackerInfo.Rule = rule.RuleType().String()
 		ut.TrackerInfo.RulePayload = rule.Payload()
 	}
+
+	log.Debugln("[RuleTrace] tracker udp id=%s host=%q dstIP=%s chain=%s rule=%q payload=%q specialProxy=%q specialRules=%q type=%s push=%t",
+		ut.ID(), metadata.Host, metadata.DstIP.String(), ut.TrackerInfo.Chain.String(), ut.TrackerInfo.Rule,
+		ut.TrackerInfo.RulePayload, metadata.SpecialProxy, metadata.SpecialRules, metadata.Type.String(), pushToManager)
 
 	manager.Join(ut)
 	return ut
