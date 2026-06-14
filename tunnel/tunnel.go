@@ -33,8 +33,9 @@ import (
 )
 
 const (
-	queueCapacity  = 64  // chan capacity tcpQueue and udpQueue
-	senderCapacity = 128 // chan capacity of PacketSender
+	queueCapacity   = 64  // chan capacity tcpQueue and udpQueue
+	senderCapacity  = 128 // chan capacity of PacketSender
+	enableRuleTrace = false
 )
 
 var (
@@ -315,27 +316,29 @@ func preHandleMetadata(metadata *C.Metadata) error {
 }
 
 func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
-	log.Debugln("[RuleTrace] resolve start mode=%s network=%s type=%s source=%s remote=%s host=%q dstIP=%s specialProxy=%q specialRules=%q process=%q",
-		mode.String(), metadata.NetWork.String(), metadata.Type.String(), metadata.SourceDetail(), metadata.RemoteAddress(),
-		metadata.Host, metadata.DstIP.String(), metadata.SpecialProxy, metadata.SpecialRules, metadata.Process)
-	defer func() {
-		proxyName := "<nil>"
-		if proxy != nil {
-			proxyName = proxy.Name()
-		}
-		ruleType := "<nil>"
-		rulePayload := ""
-		if rule != nil {
-			ruleType = rule.RuleType().String()
-			rulePayload = rule.Payload()
-		}
-		errText := "<nil>"
-		if err != nil {
-			errText = err.Error()
-		}
-		log.Debugln("[RuleTrace] resolve end mode=%s proxy=%s rule=%s payload=%q err=%s host=%q dstIP=%s specialProxy=%q specialRules=%q",
-			mode.String(), proxyName, ruleType, rulePayload, errText, metadata.Host, metadata.DstIP.String(), metadata.SpecialProxy, metadata.SpecialRules)
-	}()
+	if enableRuleTrace {
+		log.Debugln("[RuleTrace] resolve start mode=%s network=%s type=%s source=%s remote=%s host=%q dstIP=%s specialProxy=%q specialRules=%q process=%q",
+			mode.String(), metadata.NetWork.String(), metadata.Type.String(), metadata.SourceDetail(), metadata.RemoteAddress(),
+			metadata.Host, metadata.DstIP.String(), metadata.SpecialProxy, metadata.SpecialRules, metadata.Process)
+		defer func() {
+			proxyName := "<nil>"
+			if proxy != nil {
+				proxyName = proxy.Name()
+			}
+			ruleType := "<nil>"
+			rulePayload := ""
+			if rule != nil {
+				ruleType = rule.RuleType().String()
+				rulePayload = rule.Payload()
+			}
+			errText := "<nil>"
+			if err != nil {
+				errText = err.Error()
+			}
+			log.Debugln("[RuleTrace] resolve end mode=%s proxy=%s rule=%s payload=%q err=%s host=%q dstIP=%s specialProxy=%q specialRules=%q",
+				mode.String(), proxyName, ruleType, rulePayload, errText, metadata.Host, metadata.DstIP.String(), metadata.SpecialProxy, metadata.SpecialRules)
+		}()
+	}
 
 	if metadata.SpecialProxy != "" {
 		var exist bool
@@ -684,25 +687,35 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 	GetRules:
 		for _, rule := range getRules(metadata) {
 			if matched, ada := rule.Match(metadata, helper); matched {
-				log.Debugln("[RuleTrace] matched rule=%s payload=%q adapter=%q host=%q dstIP=%s specialRules=%q",
-					rule.RuleType().String(), rule.Payload(), ada, metadata.Host, metadata.DstIP.String(), metadata.SpecialRules)
+				if enableRuleTrace {
+					log.Debugln("[RuleTrace] matched rule=%s payload=%q adapter=%q host=%q dstIP=%s specialRules=%q",
+						rule.RuleType().String(), rule.Payload(), ada, metadata.Host, metadata.DstIP.String(), metadata.SpecialRules)
+				}
 				adapter, ok := proxies[ada]
 				if !ok {
-					log.Warnln("[RuleTrace] matched adapter missing rule=%s payload=%q adapter=%q host=%q dstIP=%s",
-						rule.RuleType().String(), rule.Payload(), ada, metadata.Host, metadata.DstIP.String())
+					if enableRuleTrace {
+						log.Warnln("[RuleTrace] matched adapter missing rule=%s payload=%q adapter=%q host=%q dstIP=%s",
+							rule.RuleType().String(), rule.Payload(), ada, metadata.Host, metadata.DstIP.String())
+					}
 					continue
 				}
 
 				// parse multi-layer nesting
 				for current := adapter; current != nil; current = current.Unwrap(metadata, false) {
-					log.Debugln("[RuleTrace] unwrap adapter=%s type=%s rule=%s payload=%q host=%q dstIP=%s",
-						current.Name(), current.Type().String(), rule.RuleType().String(), rule.Payload(), metadata.Host, metadata.DstIP.String())
+					if enableRuleTrace {
+						log.Debugln("[RuleTrace] unwrap adapter=%s type=%s rule=%s payload=%q host=%q dstIP=%s",
+							current.Name(), current.Type().String(), rule.RuleType().String(), rule.Payload(), metadata.Host, metadata.DstIP.String())
+					}
 					if current.Type() == C.Pass {
-						log.Debugln("[RuleTrace] %s match Pass rule, continue next rule host=%q dstIP=%s", current.Name(), metadata.Host, metadata.DstIP.String())
+						if enableRuleTrace {
+							log.Debugln("[RuleTrace] %s match Pass rule, continue next rule host=%q dstIP=%s", current.Name(), metadata.Host, metadata.DstIP.String())
+						}
 						continue GetRules
 					}
 					if current.Type() == C.Rematch {
-						log.Debugln("[RuleTrace] %s match Rematch rule host=%q dstIP=%s specialRules=%q", current.Name(), metadata.Host, metadata.DstIP.String(), metadata.SpecialRules)
+						if enableRuleTrace {
+							log.Debugln("[RuleTrace] %s match Rematch rule host=%q dstIP=%s specialRules=%q", current.Name(), metadata.Host, metadata.DstIP.String(), metadata.SpecialRules)
+						}
 						rematchProxy = current
 						rematchRule = rule
 						break GetRules
@@ -711,13 +724,17 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 				}
 
 				if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
-					log.Debugln("[RuleTrace] adapter=%s type=%s UDP is not supported, continue next rule host=%q dstIP=%s",
-						adapter.Name(), adapter.Type().String(), metadata.Host, metadata.DstIP.String())
+					if enableRuleTrace {
+						log.Debugln("[RuleTrace] adapter=%s type=%s UDP is not supported, continue next rule host=%q dstIP=%s",
+							adapter.Name(), adapter.Type().String(), metadata.Host, metadata.DstIP.String())
+					}
 					continue
 				}
 
-				log.Debugln("[RuleTrace] return adapter=%s type=%s rule=%s payload=%q host=%q dstIP=%s",
-					adapter.Name(), adapter.Type().String(), rule.RuleType().String(), rule.Payload(), metadata.Host, metadata.DstIP.String())
+				if enableRuleTrace {
+					log.Debugln("[RuleTrace] return adapter=%s type=%s rule=%s payload=%q host=%q dstIP=%s",
+						adapter.Name(), adapter.Type().String(), rule.RuleType().String(), rule.Payload(), metadata.Host, metadata.DstIP.String())
+				}
 				return adapter, rule, nil
 			}
 		}
@@ -727,8 +744,10 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 				return rematchProxy, rematchRule, nil
 			}
 			rematchChain = append(rematchChain, rematchProxy.Name())
-			log.Debugln("[RuleTrace] rematch start proxy=%s rule=%s payload=%q host=%q dstIP=%s specialRules=%q",
-				rematchProxy.Name(), rematchRule.RuleType().String(), rematchRule.Payload(), metadata.Host, metadata.DstIP.String(), metadata.SpecialRules)
+			if enableRuleTrace {
+				log.Debugln("[RuleTrace] rematch start proxy=%s rule=%s payload=%q host=%q dstIP=%s specialRules=%q",
+					rematchProxy.Name(), rematchRule.RuleType().String(), rematchRule.Payload(), metadata.Host, metadata.DstIP.String(), metadata.SpecialRules)
+			}
 			conn, err := rematchProxy.DialContext(context.Background(), metadata) // not a real connection, just for metadata update
 			if conn != nil {
 				_ = conn.Close()
@@ -738,13 +757,17 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 				return rematchProxy, rematchRule, nil
 			}
 			log.Debugln("[Rule] rematch proxy %s update metadata to rematch-name=%q sub-rule=%q", rematchProxy.Name(), metadata.InName, metadata.SpecialRules)
-			log.Debugln("[RuleTrace] rematch end proxy=%s host=%q dstIP=%s inName=%q specialRules=%q",
-				rematchProxy.Name(), metadata.Host, metadata.DstIP.String(), metadata.InName, metadata.SpecialRules)
+			if enableRuleTrace {
+				log.Debugln("[RuleTrace] rematch end proxy=%s host=%q dstIP=%s inName=%q specialRules=%q",
+					rematchProxy.Name(), metadata.Host, metadata.DstIP.String(), metadata.InName, metadata.SpecialRules)
+			}
 			continue
 		}
-		log.Warnln("[RuleTrace] fallback DIRECT nil-rule host=%q dstIP=%s network=%s type=%s source=%s remote=%s specialProxy=%q specialRules=%q process=%q",
-			metadata.Host, metadata.DstIP.String(), metadata.NetWork.String(), metadata.Type.String(), metadata.SourceDetail(),
-			metadata.RemoteAddress(), metadata.SpecialProxy, metadata.SpecialRules, metadata.Process)
+		if enableRuleTrace {
+			log.Warnln("[RuleTrace] fallback DIRECT nil-rule host=%q dstIP=%s network=%s type=%s source=%s remote=%s specialProxy=%q specialRules=%q process=%q",
+				metadata.Host, metadata.DstIP.String(), metadata.NetWork.String(), metadata.Type.String(), metadata.SourceDetail(),
+				metadata.RemoteAddress(), metadata.SpecialProxy, metadata.SpecialRules, metadata.Process)
+		}
 		return proxies["DIRECT"], nil, nil
 	}
 }
