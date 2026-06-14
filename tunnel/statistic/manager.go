@@ -2,6 +2,7 @@ package statistic
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -26,15 +27,16 @@ func init() {
 }
 
 type Manager struct {
-	connections   xsync.Map[string, Tracker]
-	uploadTemp    atomic.Int64
-	downloadTemp  atomic.Int64
-	uploadBlip    atomic.Int64
-	downloadBlip  atomic.Int64
-	uploadTotal   atomic.Int64
-	downloadTotal atomic.Int64
-	pid           int32
-	memory        uint64
+	connections    xsync.Map[string, Tracker]
+	processTraffic xsync.Map[string, *ProcessTraffic]
+	uploadTemp     atomic.Int64
+	downloadTemp   atomic.Int64
+	uploadBlip     atomic.Int64
+	downloadBlip   atomic.Int64
+	uploadTotal    atomic.Int64
+	downloadTotal  atomic.Int64
+	pid            int32
+	memory         uint64
 }
 
 func (m *Manager) Join(c Tracker) {
@@ -68,6 +70,16 @@ func (m *Manager) PushDownloaded(size int64) {
 	m.downloadTotal.Add(size)
 }
 
+func (m *Manager) PushUploadedForProcess(process string, size int64) {
+	m.PushUploaded(size)
+	m.processTrafficFor(process).UploadTotal.Add(size)
+}
+
+func (m *Manager) PushDownloadedForProcess(process string, size int64) {
+	m.PushDownloaded(size)
+	m.processTrafficFor(process).DownloadTotal.Add(size)
+}
+
 func (m *Manager) Now() (up int64, down int64) {
 	return m.uploadBlip.Load(), m.downloadBlip.Load()
 }
@@ -87,11 +99,17 @@ func (m *Manager) Snapshot() *Snapshot {
 		connections = append(connections, c.Info())
 		return true
 	})
+	processTraffic := make(map[string]*ProcessTraffic)
+	m.processTraffic.Range(func(key string, value *ProcessTraffic) bool {
+		processTraffic[key] = value
+		return true
+	})
 	return &Snapshot{
-		UploadTotal:   m.uploadTotal.Load(),
-		DownloadTotal: m.downloadTotal.Load(),
-		Connections:   connections,
-		Memory:        m.memory,
+		UploadTotal:    m.uploadTotal.Load(),
+		DownloadTotal:  m.downloadTotal.Load(),
+		Connections:    connections,
+		ProcessTraffic: processTraffic,
+		Memory:         m.memory,
 	}
 }
 
@@ -110,6 +128,10 @@ func (m *Manager) ResetStatistic() {
 	m.downloadTemp.Store(0)
 	m.downloadBlip.Store(0)
 	m.downloadTotal.Store(0)
+	m.processTraffic.Range(func(key string, value *ProcessTraffic) bool {
+		m.processTraffic.Delete(key)
+		return true
+	})
 }
 
 func (m *Manager) handle() {
@@ -122,8 +144,36 @@ func (m *Manager) handle() {
 }
 
 type Snapshot struct {
-	DownloadTotal int64          `json:"downloadTotal"`
-	UploadTotal   int64          `json:"uploadTotal"`
-	Connections   []*TrackerInfo `json:"connections"`
-	Memory        uint64         `json:"memory"`
+	DownloadTotal  int64                      `json:"downloadTotal"`
+	UploadTotal    int64                      `json:"uploadTotal"`
+	Connections    []*TrackerInfo             `json:"connections"`
+	ProcessTraffic map[string]*ProcessTraffic `json:"processTraffic"`
+	Memory         uint64                     `json:"memory"`
+}
+
+type ProcessTraffic struct {
+	DownloadTotal atomic.Int64 `json:"download"`
+	UploadTotal   atomic.Int64 `json:"upload"`
+}
+
+func (m *Manager) processTrafficFor(process string) *ProcessTraffic {
+	key := normalizeProcessName(process)
+	if value, ok := m.processTraffic.Load(key); ok {
+		return value
+	}
+
+	traffic := &ProcessTraffic{
+		UploadTotal:   atomic.NewInt64(0),
+		DownloadTotal: atomic.NewInt64(0),
+	}
+	actual, _ := m.processTraffic.LoadOrStore(key, traffic)
+	return actual
+}
+
+func normalizeProcessName(process string) string {
+	base, _, _ := strings.Cut(process, ":")
+	if base == "" {
+		return "Unknown"
+	}
+	return base
 }

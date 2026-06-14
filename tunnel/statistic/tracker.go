@@ -66,7 +66,7 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 	n, err := tt.Conn.Read(b)
 	download := int64(n)
 	if tt.pushToManager {
-		tt.manager.PushDownloaded(download)
+		tt.manager.PushDownloadedForProcess(tt.Metadata.Process, download)
 	}
 	tt.DownloadTotal.Add(download)
 	return n, err
@@ -76,7 +76,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 	err = tt.Conn.ReadBuffer(buffer)
 	download := int64(buffer.Len())
 	if tt.pushToManager {
-		tt.manager.PushDownloaded(download)
+		tt.manager.PushDownloadedForProcess(tt.Metadata.Process, download)
 	}
 	tt.DownloadTotal.Add(download)
 	return
@@ -85,7 +85,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(download int64) {
 		if tt.pushToManager {
-			tt.manager.PushDownloaded(download)
+			tt.manager.PushDownloadedForProcess(tt.Metadata.Process, download)
 		}
 		tt.DownloadTotal.Add(download)
 	}}
@@ -95,7 +95,7 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 	n, err := tt.Conn.Write(b)
 	upload := int64(n)
 	if tt.pushToManager {
-		tt.manager.PushUploaded(upload)
+		tt.manager.PushUploadedForProcess(tt.Metadata.Process, upload)
 	}
 	tt.UploadTotal.Add(upload)
 	return n, err
@@ -105,7 +105,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 	upload := int64(buffer.Len())
 	err = tt.Conn.WriteBuffer(buffer)
 	if tt.pushToManager {
-		tt.manager.PushUploaded(upload)
+		tt.manager.PushUploadedForProcess(tt.Metadata.Process, upload)
 	}
 	tt.UploadTotal.Add(upload)
 	return
@@ -114,7 +114,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(upload int64) {
 		if tt.pushToManager {
-			tt.manager.PushUploaded(upload)
+			tt.manager.PushUploadedForProcess(tt.Metadata.Process, upload)
 		}
 		tt.UploadTotal.Add(upload)
 	}}
@@ -150,10 +150,10 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 
 	if pushToManager {
 		if uploadTotal > 0 {
-			manager.PushUploaded(uploadTotal)
+			manager.PushUploadedForProcess(metadata.Process, uploadTotal)
 		}
 		if downloadTotal > 0 {
-			manager.PushDownloaded(downloadTotal)
+			manager.PushDownloadedForProcess(metadata.Process, downloadTotal)
 		}
 	}
 
@@ -200,7 +200,7 @@ func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, addr, err := ut.PacketConn.ReadFrom(b)
 	download := int64(n)
 	if ut.pushToManager {
-		ut.manager.PushDownloaded(download)
+		ut.manager.PushDownloadedForProcess(ut.Metadata.Process, download)
 	}
 	ut.DownloadTotal.Add(download)
 	return n, addr, err
@@ -210,7 +210,7 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 	data, put, addr, err = ut.PacketConn.WaitReadFrom()
 	download := int64(len(data))
 	if ut.pushToManager {
-		ut.manager.PushDownloaded(download)
+		ut.manager.PushDownloadedForProcess(ut.Metadata.Process, download)
 	}
 	ut.DownloadTotal.Add(download)
 	return
@@ -220,7 +220,7 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 	n, err := ut.PacketConn.WriteTo(b, addr)
 	upload := int64(n)
 	if ut.pushToManager {
-		ut.manager.PushUploaded(upload)
+		ut.manager.PushUploadedForProcess(ut.Metadata.Process, upload)
 	}
 	ut.UploadTotal.Add(upload)
 	return n, err
@@ -256,10 +256,10 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 
 	if pushToManager {
 		if uploadTotal > 0 {
-			manager.PushUploaded(uploadTotal)
+			manager.PushUploadedForProcess(metadata.Process, uploadTotal)
 		}
 		if downloadTotal > 0 {
-			manager.PushDownloaded(downloadTotal)
+			manager.PushDownloadedForProcess(metadata.Process, downloadTotal)
 		}
 	}
 
