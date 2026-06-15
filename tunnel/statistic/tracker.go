@@ -17,6 +17,7 @@ import (
 )
 
 const enableRuleTrace = false
+const maxFailedConnections = 1000
 
 type Tracker interface {
 	ID() string
@@ -36,6 +37,53 @@ type TrackerInfo struct {
 	Rule          string       `json:"rule"`
 	RulePayload   string       `json:"rulePayload"`
 	DNSServer     string       `json:"dnsServer,omitempty"`
+}
+
+type FailedConnectionInfo struct {
+	UUID          uuid.UUID   `json:"id"`
+	Metadata      *C.Metadata `json:"metadata"`
+	FailedAt      time.Time   `json:"failedAt"`
+	Chain         C.Chain     `json:"chains"`
+	ProviderChain C.Chain     `json:"providerChains"`
+	Rule          string      `json:"rule"`
+	RulePayload   string      `json:"rulePayload"`
+	Proxy         string      `json:"proxy"`
+	Error         string      `json:"error"`
+}
+
+func (m *Manager) RecordFailedConnection(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err error) {
+	if metadata == nil || err == nil {
+		return
+	}
+
+	proxyName := ""
+	chain := C.Chain{}
+	if proxy != nil {
+		proxyName = proxy.Name()
+		chain = C.Chain{proxyName}
+	}
+
+	info := &FailedConnectionInfo{
+		UUID:     utils.NewUUIDV4(),
+		Metadata: metadata.Clone(),
+		FailedAt: time.Now(),
+		Chain:    chain,
+		Proxy:    proxyName,
+		Error:    err.Error(),
+	}
+	if rule != nil {
+		info.Rule = rule.RuleType().String()
+		info.RulePayload = rule.Payload()
+	}
+
+	m.failedMux.Lock()
+	defer m.failedMux.Unlock()
+
+	m.failed = append(m.failed, info)
+	if len(m.failed) > maxFailedConnections {
+		copy(m.failed, m.failed[len(m.failed)-maxFailedConnections:])
+		m.failed = m.failed[:maxFailedConnections]
+	}
 }
 
 type tcpTracker struct {

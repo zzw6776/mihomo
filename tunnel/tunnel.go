@@ -459,6 +459,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 	if err := preHandleMetadata(metadata.Clone()); err != nil { // precheck without modify metadata
 		packet.Drop()
 		log.Debugln("[Metadata PreHandle] error: %s", err)
+		statistic.DefaultManager.RecordFailedConnection(metadata, nil, nil, err)
 		return
 	}
 
@@ -485,6 +486,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 			proxy, rule, err := resolveMetadata(metadata)
 			if err != nil {
 				log.Warnln("[UDP] Parse metadata failed: %s", err.Error())
+				statistic.DefaultManager.RecordFailedConnection(metadata, nil, nil, err)
 				return nil, nil, err
 			}
 
@@ -497,6 +499,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 				logMetadataErr(metadata, rule, proxy, err)
 			})
 			if err != nil {
+				statistic.DefaultManager.RecordFailedConnection(metadata, rule, proxy, err)
 				return nil, nil, err
 			}
 			logMetadata(metadata, rule, rawPc)
@@ -560,6 +563,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	// If both trials have failed, we can do nothing but give up
 	if preHandleFailed {
+		statistic.DefaultManager.RecordFailedConnection(metadata, nil, nil, errors.New("metadata pre-handle failed"))
 		log.Debugln("[Metadata PreHandle] failed to sniff a domain for connection %s --> %s, give up",
 			metadata.SourceDetail(), metadata.RemoteAddress())
 		return
@@ -579,6 +583,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 	proxy, rule, err := resolveMetadata(metadata)
 	if err != nil {
 		log.Warnln("[Metadata] parse failed: %s", err.Error())
+		statistic.DefaultManager.RecordFailedConnection(metadata, nil, nil, err)
 		return
 	}
 
@@ -633,6 +638,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 		logMetadataErr(metadata, rule, proxy, err)
 	})
 	if err != nil {
+		statistic.DefaultManager.RecordFailedConnection(metadata, rule, proxy, err)
 		return
 	}
 	logMetadata(metadata, rule, remoteConn)

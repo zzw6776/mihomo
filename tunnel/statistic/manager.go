@@ -3,6 +3,7 @@ package statistic
 import (
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -29,6 +30,8 @@ func init() {
 type Manager struct {
 	connections    xsync.Map[string, Tracker]
 	processTraffic xsync.Map[string, *ProcessTraffic]
+	failedMux      sync.Mutex
+	failed         []*FailedConnectionInfo
 	uploadTemp     atomic.Int64
 	downloadTemp   atomic.Int64
 	uploadBlip     atomic.Int64
@@ -104,13 +107,24 @@ func (m *Manager) Snapshot() *Snapshot {
 		processTraffic[key] = value
 		return true
 	})
+	failedConnections := m.FailedConnections()
 	return &Snapshot{
-		UploadTotal:    m.uploadTotal.Load(),
-		DownloadTotal:  m.downloadTotal.Load(),
-		Connections:    connections,
-		ProcessTraffic: processTraffic,
-		Memory:         m.memory,
+		UploadTotal:       m.uploadTotal.Load(),
+		DownloadTotal:     m.downloadTotal.Load(),
+		Connections:       connections,
+		FailedConnections: failedConnections,
+		ProcessTraffic:    processTraffic,
+		Memory:            m.memory,
 	}
+}
+
+func (m *Manager) FailedConnections() []*FailedConnectionInfo {
+	m.failedMux.Lock()
+	defer m.failedMux.Unlock()
+
+	failed := make([]*FailedConnectionInfo, len(m.failed))
+	copy(failed, m.failed)
+	return failed
 }
 
 func (m *Manager) updateMemory() {
@@ -132,6 +146,9 @@ func (m *Manager) ResetStatistic() {
 		m.processTraffic.Delete(key)
 		return true
 	})
+	m.failedMux.Lock()
+	m.failed = nil
+	m.failedMux.Unlock()
 }
 
 func (m *Manager) handle() {
@@ -144,11 +161,12 @@ func (m *Manager) handle() {
 }
 
 type Snapshot struct {
-	DownloadTotal  int64                      `json:"downloadTotal"`
-	UploadTotal    int64                      `json:"uploadTotal"`
-	Connections    []*TrackerInfo             `json:"connections"`
-	ProcessTraffic map[string]*ProcessTraffic `json:"processTraffic"`
-	Memory         uint64                     `json:"memory"`
+	DownloadTotal     int64                      `json:"downloadTotal"`
+	UploadTotal       int64                      `json:"uploadTotal"`
+	Connections       []*TrackerInfo             `json:"connections"`
+	FailedConnections []*FailedConnectionInfo    `json:"failedConnections"`
+	ProcessTraffic    map[string]*ProcessTraffic `json:"processTraffic"`
+	Memory            uint64                     `json:"memory"`
 }
 
 type ProcessTraffic struct {
