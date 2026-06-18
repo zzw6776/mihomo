@@ -52,6 +52,9 @@ type FailedConnectionInfo struct {
 }
 
 func (m *Manager) RecordFailedConnection(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err error) {
+	if !m.HistoryEnabled() {
+		return
+	}
 	if metadata == nil || err == nil {
 		return
 	}
