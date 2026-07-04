@@ -17,7 +17,6 @@ import (
 )
 
 const enableRuleTrace = false
-const maxFailedConnections = 1000
 
 type Tracker interface {
 	ID() string
@@ -79,14 +78,7 @@ func (m *Manager) RecordFailedConnection(metadata *C.Metadata, rule C.Rule, prox
 		info.RulePayload = rule.Payload()
 	}
 
-	m.failedMux.Lock()
-	defer m.failedMux.Unlock()
-
-	m.failed = append(m.failed, info)
-	if len(m.failed) > maxFailedConnections {
-		copy(m.failed, m.failed[len(m.failed)-maxFailedConnections:])
-		m.failed = m.failed[:maxFailedConnections]
-	}
+	m.appendHistoryEvent(historyEvent{failed: info})
 }
 
 type tcpTracker struct {

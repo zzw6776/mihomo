@@ -7,14 +7,13 @@ import (
 	stdatomic "sync/atomic"
 	"time"
 
+	"github.com/metacubex/bbolt"
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/xsync"
 	"github.com/metacubex/mihomo/component/memory"
 )
 
 var DefaultManager *Manager
-
-const maxClosedConnections = 5000
 
 func init() {
 	DefaultManager = &Manager{
@@ -31,22 +30,29 @@ func init() {
 }
 
 type Manager struct {
-	connections    xsync.Map[string, Tracker]
-	processTraffic xsync.Map[string, *ProcessTraffic]
-	historyMux     sync.Mutex
-	historyEnabled stdatomic.Bool
-	closedMux      sync.Mutex
-	closed         []*TrackerInfo
-	failedMux      sync.Mutex
-	failed         []*FailedConnectionInfo
-	uploadTemp     atomic.Int64
-	downloadTemp   atomic.Int64
-	uploadBlip     atomic.Int64
-	downloadBlip   atomic.Int64
-	uploadTotal    atomic.Int64
-	downloadTotal  atomic.Int64
-	pid            int32
-	memory         uint64
+	connections         xsync.Map[string, Tracker]
+	processTraffic      xsync.Map[string, *ProcessTraffic]
+	historyMux          sync.Mutex
+	historyEnabled      stdatomic.Bool
+	eventsMux           sync.Mutex
+	eventsSequence      uint64
+	eventsDB            *bbolt.DB
+	eventsJournalDirty  bool
+	eventsSession       string
+	eventsJournalFailed bool
+	eventsNeedsClear    bool
+	eventsFallback      []historyEvent
+	eventsDropped       uint64
+	eventsAckToken      uint64
+	eventsPendingAck    *historyPendingAck
+	uploadTemp          atomic.Int64
+	downloadTemp        atomic.Int64
+	uploadBlip          atomic.Int64
+	downloadBlip        atomic.Int64
+	uploadTotal         atomic.Int64
+	downloadTotal       atomic.Int64
+	pid                 int32
+	memory              uint64
 }
 
 func (m *Manager) Join(c Tracker) {
@@ -136,20 +142,30 @@ func (m *Manager) Snapshot() *Snapshot {
 	}
 }
 
-func (m *Manager) SetHistoryEnabled(enabled bool) {
+func (m *Manager) SetHistoryEnabled(enabled bool, session string) {
 	m.historyMux.Lock()
 	defer m.historyMux.Unlock()
+	m.eventsMux.Lock()
+	defer m.eventsMux.Unlock()
 
-	if m.historyEnabled.Load() == enabled {
+	if !enabled {
+		m.historyEnabled.Store(false)
+		m.clearProcessTraffic()
+		m.setHistorySessionLocked(session)
+		_ = m.clearJournalLocked()
 		return
 	}
-	if enabled {
-		m.ClearHistory()
-		m.historyEnabled.Store(true)
-	} else {
-		m.historyEnabled.Store(false)
-		m.ClearHistory()
+
+	wasEnabled := m.historyEnabled.Load()
+	sameSession := session == "" || m.eventsSession == session
+	if wasEnabled && sameSession && !m.eventsJournalFailed && !m.eventsNeedsClear {
+		return
 	}
+	if !wasEnabled || !sameSession {
+		m.clearProcessTraffic()
+	}
+	m.setHistorySessionLocked(session)
+	m.historyEnabled.Store(true)
 }
 
 func (m *Manager) HistoryEnabled() bool {
@@ -157,18 +173,21 @@ func (m *Manager) HistoryEnabled() bool {
 }
 
 func (m *Manager) ClearHistory() {
+	m.historyMux.Lock()
+	defer m.historyMux.Unlock()
+
+	m.clearProcessTraffic()
+
+	m.eventsMux.Lock()
+	_ = m.clearJournalLocked()
+	m.eventsMux.Unlock()
+}
+
+func (m *Manager) clearProcessTraffic() {
 	m.processTraffic.Range(func(key string, value *ProcessTraffic) bool {
 		m.processTraffic.Delete(key)
 		return true
 	})
-
-	m.closedMux.Lock()
-	m.closed = nil
-	m.closedMux.Unlock()
-
-	m.failedMux.Lock()
-	m.failed = nil
-	m.failedMux.Unlock()
 }
 
 func (m *Manager) recordClosedConnection(info *TrackerInfo) {
@@ -176,14 +195,7 @@ func (m *Manager) recordClosedConnection(info *TrackerInfo) {
 		return
 	}
 
-	m.closedMux.Lock()
-	defer m.closedMux.Unlock()
-
-	m.closed = append(m.closed, info)
-	if len(m.closed) > maxClosedConnections {
-		copy(m.closed, m.closed[len(m.closed)-maxClosedConnections:])
-		m.closed = m.closed[:maxClosedConnections]
-	}
+	m.appendHistoryEvent(historyEvent{closed: info})
 }
 
 func (m *Manager) ClosedConnections() []*TrackerInfo {
@@ -191,11 +203,13 @@ func (m *Manager) ClosedConnections() []*TrackerInfo {
 		return nil
 	}
 
-	m.closedMux.Lock()
-	defer m.closedMux.Unlock()
-
-	closed := make([]*TrackerInfo, len(m.closed))
-	copy(closed, m.closed)
+	events := m.peekHistoryEventRecords(5000)
+	closed := make([]*TrackerInfo, 0, len(events))
+	for _, event := range events {
+		if event.closed != nil {
+			closed = append(closed, event.closed)
+		}
+	}
 	return closed
 }
 
@@ -204,11 +218,13 @@ func (m *Manager) FailedConnections() []*FailedConnectionInfo {
 		return nil
 	}
 
-	m.failedMux.Lock()
-	defer m.failedMux.Unlock()
-
-	failed := make([]*FailedConnectionInfo, len(m.failed))
-	copy(failed, m.failed)
+	events := m.peekHistoryEventRecords(5000)
+	failed := make([]*FailedConnectionInfo, 0, len(events))
+	for _, event := range events {
+		if event.failed != nil {
+			failed = append(failed, event.failed)
+		}
+	}
 	return failed
 }
 
@@ -227,7 +243,7 @@ func (m *Manager) ResetStatistic() {
 	m.downloadTemp.Store(0)
 	m.downloadBlip.Store(0)
 	m.downloadTotal.Store(0)
-	m.ClearHistory()
+	m.clearProcessTraffic()
 }
 
 func (m *Manager) handle() {
@@ -247,6 +263,171 @@ type Snapshot struct {
 	FailedConnections []*FailedConnectionInfo    `json:"failedConnections"`
 	ProcessTraffic    map[string]*ProcessTraffic `json:"processTraffic"`
 	Memory            uint64                     `json:"memory"`
+}
+
+type HistoryEvents struct {
+	AckToken          uint64                  `json:"ackToken"`
+	AckSequence       uint64                  `json:"ackSequence"`
+	ClosedConnections []*TrackerInfo          `json:"closedConnections"`
+	ClosedAt          map[string]int64        `json:"closedAt"`
+	FailedConnections []*FailedConnectionInfo `json:"failedConnections"`
+	FailedAt          map[string]int64        `json:"failedAt"`
+}
+
+type historyEvent struct {
+	sequence   uint64
+	occurredAt int64
+	closed     *TrackerInfo
+	failed     *FailedConnectionInfo
+}
+
+type historyEventSource uint8
+
+const (
+	historyEventSourceNone historyEventSource = iota
+	historyEventSourceJournal
+	historyEventSourceFallback
+)
+
+type historyPendingAck struct {
+	token    uint64
+	sequence uint64
+	source   historyEventSource
+	session  string
+}
+
+func (m *Manager) appendHistoryEvent(event historyEvent) {
+	m.historyMux.Lock()
+	defer m.historyMux.Unlock()
+	if !m.historyEnabled.Load() {
+		return
+	}
+
+	m.eventsMux.Lock()
+	defer m.eventsMux.Unlock()
+
+	if event.occurredAt == 0 {
+		event.occurredAt = time.Now().UnixMilli()
+	}
+	if err := m.appendJournalEventLocked(event); err != nil {
+		if !m.eventsJournalFailed {
+			m.markHistoryJournalFailedLocked("Unable to append connection history event", err)
+		}
+		m.appendFallbackEventLocked(event)
+	}
+}
+
+func (m *Manager) PeekHistoryEvents(limit int) *HistoryEvents {
+	if !m.historyEnabled.Load() {
+		return newHistoryEvents()
+	}
+	if limit <= 0 {
+		return newHistoryEvents()
+	}
+
+	m.eventsMux.Lock()
+	defer m.eventsMux.Unlock()
+
+	records, source := m.peekHistoryEventRecordsLocked(limit)
+	if source == historyEventSourceJournal {
+		if err := m.syncHistoryJournalLocked(); err != nil && !m.eventsJournalFailed {
+			m.markHistoryJournalFailedLocked("Unable to sync connection history journal", err)
+		}
+	}
+	events := newHistoryEvents()
+	for _, event := range records {
+		events.AckSequence = event.sequence
+		if event.closed != nil {
+			events.ClosedConnections = append(events.ClosedConnections, event.closed)
+			events.ClosedAt[event.closed.UUID.String()] = event.occurredAt
+		}
+		if event.failed != nil {
+			events.FailedConnections = append(events.FailedConnections, event.failed)
+			events.FailedAt[event.failed.UUID.String()] = event.occurredAt
+		}
+	}
+	if events.AckSequence > 0 {
+		m.eventsAckToken++
+		if m.eventsAckToken == 0 {
+			m.eventsAckToken++
+		}
+		events.AckToken = m.eventsAckToken
+		m.eventsPendingAck = &historyPendingAck{
+			token:    events.AckToken,
+			sequence: events.AckSequence,
+			source:   source,
+			session:  m.eventsSession,
+		}
+	}
+	return events
+}
+
+func newHistoryEvents() *HistoryEvents {
+	return &HistoryEvents{
+		ClosedConnections: make([]*TrackerInfo, 0),
+		ClosedAt:          make(map[string]int64),
+		FailedConnections: make([]*FailedConnectionInfo, 0),
+		FailedAt:          make(map[string]int64),
+	}
+}
+
+func (m *Manager) peekHistoryEventRecords(limit int) []historyEvent {
+	m.eventsMux.Lock()
+	defer m.eventsMux.Unlock()
+	records, _ := m.peekHistoryEventRecordsLocked(limit)
+	return records
+}
+
+func (m *Manager) peekHistoryEventRecordsLocked(limit int) ([]historyEvent, historyEventSource) {
+	records, err := m.peekJournalEventsLocked(limit)
+	if err == nil {
+		return records, historyEventSourceJournal
+	}
+	if !m.eventsJournalFailed {
+		m.markHistoryJournalFailedLocked("Unable to read connection history journal", err)
+	}
+	count := limit
+	if count > len(m.eventsFallback) {
+		count = len(m.eventsFallback)
+	}
+	records = make([]historyEvent, count)
+	copy(records, m.eventsFallback[:count])
+	return records, historyEventSourceFallback
+}
+
+func (m *Manager) AckHistoryEvents(token, sequence uint64) {
+	if token == 0 || sequence == 0 {
+		return
+	}
+
+	m.eventsMux.Lock()
+	defer m.eventsMux.Unlock()
+
+	pending := m.eventsPendingAck
+	if pending == nil || pending.token != token || pending.sequence != sequence || pending.session != m.eventsSession {
+		return
+	}
+	m.eventsPendingAck = nil
+
+	if pending.source == historyEventSourceJournal {
+		if err := m.ackJournalEventsLocked(sequence); err != nil && !m.eventsJournalFailed {
+			m.markHistoryJournalFailedLocked("Unable to acknowledge connection history journal", err)
+		}
+		return
+	}
+	if pending.source != historyEventSourceFallback {
+		return
+	}
+
+	firstPending := 0
+	for firstPending < len(m.eventsFallback) && m.eventsFallback[firstPending].sequence <= sequence {
+		firstPending++
+	}
+	copy(m.eventsFallback, m.eventsFallback[firstPending:])
+	m.eventsFallback = m.eventsFallback[:len(m.eventsFallback)-firstPending]
+	if len(m.eventsFallback) == 0 && m.eventsJournalFailed && !m.eventsNeedsClear {
+		m.setHistorySessionLocked(m.eventsSession)
+	}
 }
 
 type ProcessTraffic struct {
