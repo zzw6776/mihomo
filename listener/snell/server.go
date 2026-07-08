@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	LC "github.com/metacubex/mihomo/listener/config"
 	"io"
 	"net"
 	"net/netip"
@@ -17,9 +16,16 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/sing"
+	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/shadowsocks/shadowaead"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
 	"github.com/metacubex/mihomo/transport/snell"
+
+	shadowtls "github.com/metacubex/sing-shadowtls"
+	"github.com/metacubex/sing/common"
+	M "github.com/metacubex/sing/common/metadata"
 )
 
 const maxPacketLength = 0x3fff
@@ -28,13 +34,16 @@ type Listener struct {
 	closed    bool
 	config    LC.SnellServer
 	listeners []net.Listener
+	shadowTLS *shadowtls.Service
 }
 
 func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (C.MultiAddrListener, error) {
 	if config.Version == 0 {
 		config.Version = snell.Version4
 	}
-	if config.Version != snell.Version4 && config.Version != snell.Version5 {
+	switch config.Version {
+	case snell.Version1, snell.Version2, snell.Version3, snell.Version4, snell.Version5:
+	default:
 		return nil, fmt.Errorf("snell inbound version %d is not supported", config.Version)
 	}
 	if config.Psk == "" {
@@ -47,6 +56,51 @@ func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 	}
 
 	l := &Listener{config: config}
+
+	if config.ShadowTLS.Enable {
+		buildHandshake := func(handshake LC.ShadowTLSHandshakeOptions) (handshakeConfig shadowtls.HandshakeConfig) {
+			handshakeConfig.Server = M.ParseSocksaddr(handshake.Dest)
+			handshakeConfig.Dialer = sing.NewDialer(tunnel, handshake.Proxy)
+			return
+		}
+		var handshakeForServerName map[string]shadowtls.HandshakeConfig
+		if config.ShadowTLS.Version > 1 {
+			handshakeForServerName = make(map[string]shadowtls.HandshakeConfig)
+			for serverName, serverOptions := range config.ShadowTLS.HandshakeForServerName {
+				handshakeForServerName[serverName] = buildHandshake(serverOptions)
+			}
+		}
+		var wildcardSNI shadowtls.WildcardSNI
+		switch config.ShadowTLS.WildcardSNI {
+		case "authed":
+			wildcardSNI = shadowtls.WildcardSNIAuthed
+		case "all":
+			wildcardSNI = shadowtls.WildcardSNIAll
+		default:
+			wildcardSNI = shadowtls.WildcardSNIOff
+		}
+		var err error
+		l.shadowTLS, err = shadowtls.NewService(shadowtls.ServiceConfig{
+			Version:  config.ShadowTLS.Version,
+			Password: config.ShadowTLS.Password,
+			Users: common.Map(config.ShadowTLS.Users, func(it LC.ShadowTLSUser) shadowtls.User {
+				return shadowtls.User{Name: it.Name, Password: it.Password}
+			}),
+			Handshake:              buildHandshake(config.ShadowTLS.Handshake),
+			HandshakeForServerName: handshakeForServerName,
+			StrictMode:             config.ShadowTLS.StrictMode,
+			WildcardSNI:            wildcardSNI,
+			Handler: sing.FnHandler{
+				NewConnectionFn: func(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
+					l.handleConn(conn, tunnel, sing.AdditionsFromContext(ctx)...)
+					return nil
+				}},
+			Logger: log.SingLogger,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr = strings.TrimSpace(addr)
 		if addr == "" {
@@ -98,7 +152,19 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 
 func (l *Listener) HandleConn(rawConn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	defer rawConn.Close()
+	conn := rawConn
+	if l.shadowTLS != nil {
+		ctx := sing.WithAdditions(context.TODO(), additions...)
+		_ = l.shadowTLS.NewConnection(ctx, conn, M.Metadata{
+			Protocol: "snell",
+			Source:   M.SocksaddrFromNet(conn.RemoteAddr()),
+		})
+		return
+	}
+	l.handleConn(rawConn, tunnel, additions...)
+}
 
+func (l *Listener) handleConn(rawConn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	conn := rawConn
 	switch l.config.ObfsMode {
 	case "http":
