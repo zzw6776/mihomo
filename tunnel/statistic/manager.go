@@ -30,32 +30,40 @@ func init() {
 }
 
 type Manager struct {
-	connections         xsync.Map[string, Tracker]
-	processTraffic      xsync.Map[string, *ProcessTraffic]
-	historyMux          sync.Mutex
-	historyEnabled      stdatomic.Bool
-	eventsMux           sync.Mutex
-	eventsSequence      uint64
-	eventsDB            *bbolt.DB
-	eventsJournalDirty  bool
-	eventsSession       string
-	eventsJournalFailed bool
-	eventsNeedsClear    bool
-	eventsFallback      []historyEvent
-	eventsDropped       uint64
-	eventsAckToken      uint64
-	eventsPendingAck    *historyPendingAck
-	uploadTemp          atomic.Int64
-	downloadTemp        atomic.Int64
-	uploadBlip          atomic.Int64
-	downloadBlip        atomic.Int64
-	uploadTotal         atomic.Int64
-	downloadTotal       atomic.Int64
-	pid                 int32
-	memory              uint64
+	connections                xsync.Map[string, Tracker]
+	processTraffic             xsync.Map[string, *ProcessTraffic]
+	connectionTrafficBaselines xsync.Map[string, connectionTrafficBaseline]
+	historyMux                 sync.Mutex
+	historyEnabled             stdatomic.Bool
+	eventsMux                  sync.Mutex
+	eventsSequence             uint64
+	eventsDB                   *bbolt.DB
+	eventsJournalDirty         bool
+	eventsSession              string
+	eventsJournalFailed        bool
+	eventsNeedsClear           bool
+	eventsFallback             []historyEvent
+	eventsDropped              uint64
+	eventsAckToken             uint64
+	eventsPendingAck           *historyPendingAck
+	uploadTemp                 atomic.Int64
+	downloadTemp               atomic.Int64
+	uploadBlip                 atomic.Int64
+	downloadBlip               atomic.Int64
+	uploadTotal                atomic.Int64
+	downloadTotal              atomic.Int64
+	pid                        int32
+	memory                     uint64
+}
+
+type connectionTrafficBaseline struct {
+	upload   int64
+	download int64
 }
 
 func (m *Manager) Join(c Tracker) {
+	m.historyMux.Lock()
+	defer m.historyMux.Unlock()
 	m.connections.Store(c.ID(), c)
 }
 
@@ -119,11 +127,32 @@ func (m *Manager) Memory() uint64 {
 }
 
 func (m *Manager) Snapshot() *Snapshot {
-	var connections []*TrackerInfo
+	return m.snapshot(false)
+}
+
+func (m *Manager) HistorySnapshot() *Snapshot {
+	return m.snapshot(true)
+}
+
+func (m *Manager) snapshot(historyRelative bool) *Snapshot {
+	connections := make([]*TrackerInfo, 0)
 	m.Range(func(c Tracker) bool {
-		connections = append(connections, c.Info())
+		connections = append(connections, m.connectionInfoForSnapshot(c.Info(), historyRelative))
 		return true
 	})
+	var closedConnections []*TrackerInfo
+	if historyRelative {
+		closedConnections = m.historyClosedConnections()
+	} else {
+		closedConnections = m.ClosedConnections()
+	}
+	if closedConnections == nil {
+		closedConnections = make([]*TrackerInfo, 0)
+	}
+	failedConnections := m.FailedConnections()
+	if failedConnections == nil {
+		failedConnections = make([]*FailedConnectionInfo, 0)
+	}
 	processTraffic := make(map[string]*ProcessTraffic)
 	if m.historyEnabled.Load() {
 		m.processTraffic.Range(func(key string, value *ProcessTraffic) bool {
@@ -135,8 +164,8 @@ func (m *Manager) Snapshot() *Snapshot {
 		UploadTotal:       m.uploadTotal.Load(),
 		DownloadTotal:     m.downloadTotal.Load(),
 		Connections:       connections,
-		ClosedConnections: m.ClosedConnections(),
-		FailedConnections: m.FailedConnections(),
+		ClosedConnections: closedConnections,
+		FailedConnections: failedConnections,
 		ProcessTraffic:    processTraffic,
 		Memory:            m.memory,
 	}
@@ -151,6 +180,7 @@ func (m *Manager) SetHistoryEnabled(enabled bool, session string) {
 	if !enabled {
 		m.historyEnabled.Store(false)
 		m.clearProcessTraffic()
+		m.clearConnectionTrafficBaselines()
 		m.setHistorySessionLocked(session)
 		_ = m.clearJournalLocked()
 		return
@@ -163,6 +193,7 @@ func (m *Manager) SetHistoryEnabled(enabled bool, session string) {
 	}
 	if !wasEnabled || !sameSession {
 		m.clearProcessTraffic()
+		m.captureConnectionTrafficBaselines()
 	}
 	m.setHistorySessionLocked(session)
 	m.historyEnabled.Store(true)
@@ -177,6 +208,7 @@ func (m *Manager) ClearHistory() {
 	defer m.historyMux.Unlock()
 
 	m.clearProcessTraffic()
+	m.captureConnectionTrafficBaselines()
 
 	m.eventsMux.Lock()
 	_ = m.clearJournalLocked()
@@ -190,15 +222,82 @@ func (m *Manager) clearProcessTraffic() {
 	})
 }
 
+func (m *Manager) captureConnectionTrafficBaselines() {
+	m.clearConnectionTrafficBaselines()
+	m.connections.Range(func(key string, value Tracker) bool {
+		info := value.Info()
+		if info != nil {
+			m.connectionTrafficBaselines.Store(key, connectionTrafficBaseline{
+				upload:   info.UploadTotal.Load(),
+				download: info.DownloadTotal.Load(),
+			})
+		}
+		return true
+	})
+}
+
+func (m *Manager) clearConnectionTrafficBaselines() {
+	m.connectionTrafficBaselines.Range(func(key string, value connectionTrafficBaseline) bool {
+		m.connectionTrafficBaselines.Delete(key)
+		return true
+	})
+}
+
+func (m *Manager) connectionInfoForCurrentHistory(info *TrackerInfo) *TrackerInfo {
+	if info == nil {
+		return nil
+	}
+	baseline, ok := m.connectionTrafficBaselines.Load(info.UUID.String())
+	if !ok {
+		return info
+	}
+	upload := info.UploadTotal.Load() - baseline.upload
+	if upload < 0 {
+		upload = 0
+	}
+	download := info.DownloadTotal.Load() - baseline.download
+	if download < 0 {
+		download = 0
+	}
+	return info.withTraffic(
+		upload,
+		download,
+	)
+}
+
+func (m *Manager) connectionInfoForSnapshot(info *TrackerInfo, historyRelative bool) *TrackerInfo {
+	if !historyRelative {
+		return info
+	}
+	return m.connectionInfoForCurrentHistory(info)
+}
+
 func (m *Manager) recordClosedConnection(info *TrackerInfo) {
 	if info == nil {
 		return
 	}
 
-	m.appendHistoryEvent(historyEvent{closed: info})
+	m.appendHistoryEvent(historyEvent{rawClosed: info})
 }
 
 func (m *Manager) ClosedConnections() []*TrackerInfo {
+	if !m.historyEnabled.Load() {
+		return nil
+	}
+
+	events := m.peekHistoryEventRecords(5000)
+	closed := make([]*TrackerInfo, 0, len(events))
+	for _, event := range events {
+		if event.rawClosed != nil {
+			closed = append(closed, event.rawClosed)
+		} else if event.closed != nil {
+			closed = append(closed, event.closed)
+		}
+	}
+	return closed
+}
+
+func (m *Manager) historyClosedConnections() []*TrackerInfo {
 	if !m.historyEnabled.Load() {
 		return nil
 	}
@@ -278,6 +377,7 @@ type historyEvent struct {
 	sequence   uint64
 	occurredAt int64
 	closed     *TrackerInfo
+	rawClosed  *TrackerInfo
 	failed     *FailedConnectionInfo
 }
 
@@ -301,6 +401,12 @@ func (m *Manager) appendHistoryEvent(event historyEvent) {
 	defer m.historyMux.Unlock()
 	if !m.historyEnabled.Load() {
 		return
+	}
+	if event.closed == nil && event.rawClosed != nil {
+		event.closed = m.connectionInfoForCurrentHistory(event.rawClosed)
+		if event.closed == event.rawClosed {
+			event.rawClosed = nil
+		}
 	}
 
 	m.eventsMux.Lock()

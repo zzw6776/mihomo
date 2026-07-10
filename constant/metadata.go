@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 )
 
 // SOCKS address types as defined in RFC 1928 section 5.
@@ -77,6 +78,26 @@ func (n NetWork) String() string {
 
 func (n NetWork) MarshalJSON() ([]byte, error) {
 	return json.Marshal(n.String())
+}
+
+func (n *NetWork) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	switch strings.ToLower(value) {
+	case "tcp":
+		*n = TCP
+	case "udp":
+		*n = UDP
+	case "all":
+		*n = ALLNet
+	case "invalid":
+		*n = InvalidNet
+	default:
+		return fmt.Errorf("unknown network: %s", value)
+	}
+	return nil
 }
 
 type Type int
@@ -179,6 +200,19 @@ func ParseType(t string) (*Type, error) {
 
 func (t Type) MarshalJSON() ([]byte, error) {
 	return json.Marshal(t.String())
+}
+
+func (t *Type) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	parsed, err := ParseType(strings.ToUpper(value))
+	if err != nil {
+		return err
+	}
+	*t = *parsed
+	return nil
 }
 
 // Metadata is used to store connection address

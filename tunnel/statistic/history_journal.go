@@ -28,6 +28,7 @@ type persistedHistoryEvent struct {
 	Sequence   uint64                `json:"sequence"`
 	OccurredAt int64                 `json:"occurredAt"`
 	Closed     *TrackerInfo          `json:"closed,omitempty"`
+	RawClosed  *TrackerInfo          `json:"rawClosed,omitempty"`
 	Failed     *FailedConnectionInfo `json:"failed,omitempty"`
 }
 
@@ -165,6 +166,7 @@ func (m *Manager) appendJournalEventLocked(event historyEvent) error {
 			Sequence:   sequence,
 			OccurredAt: event.occurredAt,
 			Closed:     event.closed,
+			RawClosed:  event.rawClosed,
 			Failed:     event.failed,
 		})
 		if err != nil {
@@ -219,6 +221,7 @@ func (m *Manager) peekJournalEventsLocked(limit int) ([]historyEvent, error) {
 				sequence:   sequence,
 				occurredAt: persisted.OccurredAt,
 				closed:     persisted.Closed,
+				rawClosed:  persisted.RawClosed,
 				failed:     persisted.Failed,
 			})
 		}

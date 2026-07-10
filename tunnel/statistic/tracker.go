@@ -50,6 +50,24 @@ type FailedConnectionInfo struct {
 	Error         string      `json:"error"`
 }
 
+func (info *TrackerInfo) withTraffic(upload, download int64) *TrackerInfo {
+	if info == nil {
+		return nil
+	}
+	return &TrackerInfo{
+		UUID:          info.UUID,
+		Metadata:      info.Metadata,
+		UploadTotal:   atomic.NewInt64(upload),
+		DownloadTotal: atomic.NewInt64(download),
+		Start:         info.Start,
+		Chain:         info.Chain,
+		ProviderChain: info.ProviderChain,
+		Rule:          info.Rule,
+		RulePayload:   info.RulePayload,
+		DNSServer:     info.DNSServer,
+	}
+}
+
 func (m *Manager) RecordFailedConnection(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err error) {
 	if !m.HistoryEnabled() {
 		return
