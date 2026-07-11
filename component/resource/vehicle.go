@@ -3,6 +3,7 @@ package resource
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -155,10 +156,19 @@ func (h *HTTPVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []b
 	}
 	var reader io.Reader = resp.Body
 	if h.sizeLimit > 0 {
-		reader = io.LimitReader(reader, h.sizeLimit)
+		readLimit := h.sizeLimit
+		if readLimit < int64(^uint64(0)>>1) {
+			readLimit++
+		}
+		reader = io.LimitReader(reader, readLimit)
 	}
 	buf, err = io.ReadAll(reader)
 	if err != nil {
+		return
+	}
+	if h.sizeLimit > 0 && int64(len(buf)) > h.sizeLimit {
+		buf = nil
+		err = fmt.Errorf("response exceeds maximum size of %d bytes", h.sizeLimit)
 		return
 	}
 	hash = utils.MakeHash(buf)

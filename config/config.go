@@ -600,11 +600,26 @@ func DefaultRawConfig() *RawConfig {
 }
 
 func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
+	return unmarshalRawConfig(buf, func(data []byte) ([]byte, error) {
+		return age.DecryptBytes(data)
+	})
+}
+
+func UnmarshalRawConfigWithSecretKeys(buf []byte, secretKeys ...string) (*RawConfig, error) {
+	return unmarshalRawConfig(buf, func(data []byte) ([]byte, error) {
+		return age.DecryptBytesWithSecretKeys(data, secretKeys...)
+	})
+}
+
+func unmarshalRawConfig(
+	buf []byte,
+	decrypt func([]byte) ([]byte, error),
+) (*RawConfig, error) {
 	// config with default value
 	rawCfg := DefaultRawConfig()
 
 	// decrypt config
-	buf, err := age.DecryptBytes(buf)
+	buf, err := decrypt(buf)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt config error: %w", err)
 	}

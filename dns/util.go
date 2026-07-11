@@ -11,8 +11,8 @@ import (
 
 	"github.com/metacubex/mihomo/common/picker"
 	"github.com/metacubex/mihomo/component/ech/echparser"
-	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
 	D "github.com/miekg/dns"
@@ -372,7 +372,11 @@ func msgToLogString(msg *D.Msg) string {
 
 func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.Msg, cache bool, err error) {
 	cache = true
-	fast, ctx := picker.WithTimeout[*D.Msg](ctx, resolver.DefaultDNSTimeout)
+	type exchangeResult struct {
+		message *D.Msg
+		server  string
+	}
+	fast, ctx := picker.WithTimeout[*exchangeResult](ctx, resolver.DefaultDNSTimeout)
 	defer fast.Close()
 	domain := msgToDomain(m)
 	_, qTypeStr := msgToQtype(m)
@@ -382,7 +386,7 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 			return msg, false, err
 		}
 		client := client // shadow define client to ensure the value captured by the closure will not be changed in the next loop
-		fast.Go(func() (*D.Msg, error) {
+		fast.Go(func() (*exchangeResult, error) {
 			log.Debugln("[DNS] resolve %s %s from %s", domain, qTypeStr, client.Address())
 			m, err := client.ExchangeContext(ctx, m)
 			if err != nil {
@@ -392,26 +396,26 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 				// so we would ignore RCode errors from RCode clients.
 				return nil, errors.New("server failure: " + D.RcodeToString[m.Rcode])
 			}
-			if len(m.Answer) > 0 {
-				for _, ans := range m.Answer {
-					if a, ok := ans.(*D.A); ok {
-						constant.ResolvedIPToDNS.Set(a.A.String(), client.Address())
-					} else if aaaa, ok := ans.(*D.AAAA); ok {
-						constant.ResolvedIPToDNS.Set(aaaa.AAAA.String(), client.Address())
-					}
-				}
-			}
-			log.Debugln("[DNS] %s --> %s from %s", domain, msgToLogString(m), client.Address())
-			return m, nil
+			return &exchangeResult{message: m, server: client.Address()}, nil
 		})
 	}
 
-	msg = fast.Wait()
-	if msg == nil {
+	result := fast.Wait()
+	if result == nil {
 		err = errors.New("all DNS requests failed")
 		if fErr := fast.Error(); fErr != nil {
 			err = fmt.Errorf("%w, first error: %w", err, fErr)
 		}
+		return
 	}
+	msg = result.message
+	for _, answer := range msg.Answer {
+		if a, ok := answer.(*D.A); ok {
+			constant.RecordResolvedDNS(domain, a.A.String(), result.server)
+		} else if aaaa, ok := answer.(*D.AAAA); ok {
+			constant.RecordResolvedDNS(domain, aaaa.AAAA.String(), result.server)
+		}
+	}
+	log.Debugln("[DNS] %s --> %s from %s", domain, msgToLogString(msg), result.server)
 	return
 }

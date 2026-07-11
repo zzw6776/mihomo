@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/age"
@@ -15,6 +16,7 @@ import (
 const FileHeader = armor.Header
 
 var globalSecretKeys []string
+var globalSecretKeysMutex sync.RWMutex
 
 // parseIdentities parse age-secret-key to age.Identity
 func parseIdentities(secretKey string) ([]age.Identity, error) {
@@ -58,7 +60,9 @@ func ToPublicKeys(secretKeys ...string) (publicKeys []string, err error) {
 
 // SetGlobalSecretKeys set global secret keys, which will be used when decrypting
 func SetGlobalSecretKeys(secretKeys ...string) {
-	globalSecretKeys = append(globalSecretKeys[:0], secretKeys...)
+	globalSecretKeysMutex.Lock()
+	globalSecretKeys = append([]string(nil), secretKeys...)
+	globalSecretKeysMutex.Unlock()
 }
 
 // VeritySecretKeys check if the secret key is valid
@@ -84,6 +88,21 @@ func VerityPublicKeys(publicKeys ...string) error {
 // DecryptBytes decrypt age armor format encrypted data
 // if not the age armor format, return original data
 func DecryptBytes(data []byte, secretKeys ...string) ([]byte, error) {
+	globalSecretKeysMutex.RLock()
+	keys := make([]string, 0, len(secretKeys)+len(globalSecretKeys))
+	keys = append(keys, secretKeys...)
+	keys = append(keys, globalSecretKeys...)
+	globalSecretKeysMutex.RUnlock()
+	return decryptBytes(data, keys)
+}
+
+// DecryptBytesWithSecretKeys decrypts only with the supplied keys and does not
+// consult the process-global profile key.
+func DecryptBytesWithSecretKeys(data []byte, secretKeys ...string) ([]byte, error) {
+	return decryptBytes(data, secretKeys)
+}
+
+func decryptBytes(data []byte, secretKeys []string) ([]byte, error) {
 	if !strings.HasPrefix(string(data), FileHeader) { // not age armor format
 		return data, nil
 	}
@@ -95,14 +114,6 @@ func DecryptBytes(data []byte, secretKeys ...string) ([]byte, error) {
 		}
 		identities = append(identities, identity...)
 	}
-	for _, secretKey := range globalSecretKeys {
-		identity, err := parseIdentities(secretKey)
-		if err != nil {
-			return nil, err
-		}
-		identities = append(identities, identity...)
-	}
-
 	r, err := age.Decrypt(armor.NewReader(bytes.NewReader(data)), identities...)
 	if err != nil {
 		return nil, err

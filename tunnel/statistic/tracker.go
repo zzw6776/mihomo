@@ -3,6 +3,7 @@ package statistic
 import (
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -56,12 +57,55 @@ func (info *TrackerInfo) withTraffic(upload, download int64) *TrackerInfo {
 	}
 	return &TrackerInfo{
 		UUID:          info.UUID,
-		Metadata:      info.Metadata,
+		Metadata:      cloneMetadata(info.Metadata),
 		UploadTotal:   atomic.NewInt64(upload),
 		DownloadTotal: atomic.NewInt64(download),
 		Start:         info.Start,
-		Chain:         info.Chain,
-		ProviderChain: info.ProviderChain,
+		Chain:         append(C.Chain(nil), info.Chain...),
+		ProviderChain: append(C.Chain(nil), info.ProviderChain...),
+		Rule:          info.Rule,
+		RulePayload:   info.RulePayload,
+		DNSServer:     info.DNSServer,
+	}
+}
+
+func cloneMetadata(metadata *C.Metadata) *C.Metadata {
+	if metadata == nil {
+		return nil
+	}
+	cloned := metadata.Clone()
+	cloned.SrcGeoIP = append([]string(nil), metadata.SrcGeoIP...)
+	cloned.DstGeoIP = append([]string(nil), metadata.DstGeoIP...)
+	return cloned
+}
+
+func enrichTrackerInfo(info *TrackerInfo) {
+	if info == nil || info.Metadata == nil || !info.Metadata.DstIP.IsValid() {
+		return
+	}
+	if info.DNSServer == "" {
+		if server, ok := C.LookupResolvedDNS(info.Metadata.Host, info.Metadata.DstIP.String()); ok {
+			info.DNSServer = server
+		}
+	}
+	if len(info.Metadata.DstGeoIP) == 0 {
+		info.Metadata.DstGeoIP = mmdb.IPInstance().LookupCode(info.Metadata.DstIP.AsSlice())
+	}
+}
+
+func snapshotTrackerInfo(info *TrackerInfo) *TrackerInfo {
+	if info == nil {
+		return nil
+	}
+	metadata := cloneMetadata(info.Metadata)
+	return &TrackerInfo{
+		UUID:          info.UUID,
+		Metadata:      metadata,
+		UploadTotal:   atomic.NewInt64(info.UploadTotal.Load()),
+		DownloadTotal: atomic.NewInt64(info.DownloadTotal.Load()),
+		Start:         info.Start,
+		Chain:         append(C.Chain(nil), info.Chain...),
+		ProviderChain: append(C.Chain(nil), info.ProviderChain...),
 		Rule:          info.Rule,
 		RulePayload:   info.RulePayload,
 		DNSServer:     info.DNSServer,
@@ -103,6 +147,7 @@ type tcpTracker struct {
 	C.Conn `json:"-"`
 	*TrackerInfo
 	manager *Manager
+	infoMux sync.Mutex
 
 	pushToManager bool `json:"-"`
 }
@@ -112,15 +157,10 @@ func (tt *tcpTracker) ID() string {
 }
 
 func (tt *tcpTracker) Info() *TrackerInfo {
-	if tt.TrackerInfo.Metadata.DstIP.IsValid() {
-		if server, ok := C.ResolvedIPToDNS.Get(tt.TrackerInfo.Metadata.DstIP.String()); ok {
-			tt.TrackerInfo.DNSServer = server
-		}
-		if len(tt.TrackerInfo.Metadata.DstGeoIP) == 0 {
-			tt.TrackerInfo.Metadata.DstGeoIP = mmdb.IPInstance().LookupCode(tt.TrackerInfo.Metadata.DstIP.AsSlice())
-		}
-	}
-	return tt.TrackerInfo
+	tt.infoMux.Lock()
+	defer tt.infoMux.Unlock()
+	enrichTrackerInfo(tt.TrackerInfo)
+	return snapshotTrackerInfo(tt.TrackerInfo)
 }
 
 func (tt *tcpTracker) Read(b []byte) (int, error) {
@@ -222,6 +262,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		t.TrackerInfo.Rule = rule.RuleType().String()
 		t.TrackerInfo.RulePayload = rule.Payload()
 	}
+	enrichTrackerInfo(t.TrackerInfo)
 
 	if enableRuleTrace {
 		log.Debugln("[RuleTrace] tracker tcp id=%s host=%q dstIP=%s chain=%s rule=%q payload=%q specialProxy=%q specialRules=%q type=%s push=%t",
@@ -237,6 +278,7 @@ type udpTracker struct {
 	C.PacketConn `json:"-"`
 	*TrackerInfo
 	manager *Manager
+	infoMux sync.Mutex
 
 	pushToManager bool `json:"-"`
 }
@@ -246,15 +288,10 @@ func (ut *udpTracker) ID() string {
 }
 
 func (ut *udpTracker) Info() *TrackerInfo {
-	if ut.TrackerInfo.Metadata.DstIP.IsValid() {
-		if server, ok := C.ResolvedIPToDNS.Get(ut.TrackerInfo.Metadata.DstIP.String()); ok {
-			ut.TrackerInfo.DNSServer = server
-		}
-		if len(ut.TrackerInfo.Metadata.DstGeoIP) == 0 {
-			ut.TrackerInfo.Metadata.DstGeoIP = mmdb.IPInstance().LookupCode(ut.TrackerInfo.Metadata.DstIP.AsSlice())
-		}
-	}
-	return ut.TrackerInfo
+	ut.infoMux.Lock()
+	defer ut.infoMux.Unlock()
+	enrichTrackerInfo(ut.TrackerInfo)
+	return snapshotTrackerInfo(ut.TrackerInfo)
 }
 
 func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -328,6 +365,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 		ut.TrackerInfo.Rule = rule.RuleType().String()
 		ut.TrackerInfo.RulePayload = rule.Payload()
 	}
+	enrichTrackerInfo(ut.TrackerInfo)
 
 	if enableRuleTrace {
 		log.Debugln("[RuleTrace] tracker udp id=%s host=%q dstIP=%s chain=%s rule=%q payload=%q specialProxy=%q specialRules=%q type=%s push=%t",

@@ -331,6 +331,33 @@ func TestCorruptedJournalEventCanBeAcknowledged(t *testing.T) {
 	}
 }
 
+func TestCorruptedJournalKeyDoesNotPanicDuringAck(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	manager := &Manager{}
+	manager.SetHistoryEnabled(true, "session-a")
+	manager.appendHistoryEvent(historyEvent{
+		failed: &FailedConnectionInfo{UUID: utils.NewUUIDV4()},
+	})
+	batch := manager.PeekHistoryEvents(10)
+	if batch.AckSequence == 0 {
+		t.Fatalf("missing pending event: %+v", batch)
+	}
+
+	manager.eventsMux.Lock()
+	err := manager.eventsDB.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(historyEventsBucket).Put([]byte{0}, []byte("invalid-key"))
+	})
+	manager.eventsMux.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.AckHistoryEvents(batch.AckToken, batch.AckSequence)
+	if !manager.eventsJournalFailed {
+		t.Fatal("invalid journal key did not mark the journal unavailable")
+	}
+}
+
 func TestFallbackBatchBlocksRecoveryUntilAcknowledged(t *testing.T) {
 	C.SetHomeDir(t.TempDir())
 	manager := &Manager{}

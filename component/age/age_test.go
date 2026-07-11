@@ -1,6 +1,7 @@
 package age_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/metacubex/mihomo/component/age"
@@ -47,4 +48,54 @@ func TestAge(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExplicitSecretKeysDoNotUseGlobalKeys(t *testing.T) {
+	secretKey, publicKey, err := age.GenX25519KeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := age.EncryptBytes([]byte("profile"), publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	age.SetGlobalSecretKeys(secretKey)
+	t.Cleanup(func() { age.SetGlobalSecretKeys() })
+
+	if _, err = age.DecryptBytesWithSecretKeys(encrypted); err == nil {
+		t.Fatal("explicit decryption unexpectedly used the global key")
+	}
+	decrypted, err := age.DecryptBytes(encrypted)
+	if err != nil || string(decrypted) != "profile" {
+		t.Fatalf("global key decryption failed: %q, %v", decrypted, err)
+	}
+}
+
+func TestGlobalSecretKeysConcurrentAccess(t *testing.T) {
+	secretKey, publicKey, err := age.GenX25519KeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := age.EncryptBytes([]byte("profile"), publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	age.SetGlobalSecretKeys(secretKey)
+	t.Cleanup(func() { age.SetGlobalSecretKeys() })
+
+	var wait sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wait.Add(1)
+		go func(worker int) {
+			defer wait.Done()
+			for iteration := 0; iteration < 100; iteration++ {
+				if worker%2 == 0 {
+					age.SetGlobalSecretKeys(secretKey)
+				} else {
+					_, _ = age.DecryptBytes(encrypted)
+				}
+			}
+		}(worker)
+	}
+	wait.Wait()
 }

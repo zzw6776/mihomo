@@ -241,6 +241,9 @@ func (m *Manager) ackJournalEventsLocked(sequence uint64) error {
 		}
 		cursor := bucket.Cursor()
 		for key, _ := cursor.First(); key != nil; key, _ = cursor.Next() {
+			if len(key) != 8 {
+				return errors.New("invalid history event sequence key")
+			}
 			if binary.BigEndian.Uint64(key) > sequence {
 				break
 			}
