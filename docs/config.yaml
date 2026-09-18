@@ -133,7 +133,7 @@ profile: # 存储 select 选择记录
 # Tun 配置
 tun:
   enable: false
-  stack: system # gvisor/mixed
+  stack: system # gvisor/mixed/mips
   dns-hijack:
     - 0.0.0.0:53 # 需要劫持的 DNS
   # auto-detect-interface: true # 自动识别出口网卡
@@ -314,6 +314,7 @@ dns:
     - dhcp://en0 # dns from dhcp
     - quic://dns.adguard.com:784 # DNS over QUIC
     # - ts://tailscale # 使用指定 Tailscale 出站的 DNS 配置查询
+    # - et://easytier # 仅解析 overlay A/PTR；建议放在 nameserver-policy
     # - '8.8.8.8#RULES' # 效果同respect-rules，但仅对该服务器生效
     # - '8.8.8.8#en0' # 兼容指定 DNS 出口网卡
 
@@ -1294,7 +1295,7 @@ proxies: # socks5
     # persistent-keepalive: 0
     # ip-stack:
     #   mode: auto # options: auto, gvisor, mips; auto uses gVisor when compiled in and mihomo IP stack (MIPS) otherwise
-    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, or bbr; ignored by gVisor
+    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, bbr, or bbr3; ignored by gVisor
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出连接
     # dialer-proxy: "ss1"
     # remote-dns-resolve: true # 强制 dns 远程解析，默认值为 false
@@ -1339,6 +1340,8 @@ proxies: # socks5
     #   reject-after-time: 180                            # AmneziaWG v3+
     #   keepalive-timeout: 10                             # AmneziaWG v3+
     #   max-handshake-attempts: 18                        # AmneziaWG v3+
+    #   random-trailers: true                             # AmneziaWG v3.1+
+    #   disable-cookies: true                             # AmneziaWG v3.1+
 
   # tailscale
   - name: "tailscale"
@@ -1364,13 +1367,14 @@ proxies: # socks5
   - name: "zerotier"
     type: zerotier
     network: "0123456789abcdef" # 16-digit ZeroTier network ID
-    # state-dir: ./zerotier-node # persistent node identity; defaults to an isolated directory derived from network and outbound name
+    # state-dir: ./zerotier-node # persistent node state and default identity; defaults to an isolated directory derived from network and outbound name
+    # identity-secret: "0123456789:0:public-key:private-key" # complete identity.secret contents; overrides the identity in state-dir and is not written there
     # planet: ./planet # optional private planet file; replaces the built-in Earth planet
     # mtu: 1400 # optional local MTU override; cannot exceed the controller MTU
     # physical-mtu: 1432 # optional ZeroTier UDP payload MTU (510-10324; default 1432)
     # ip-stack:
     #   mode: auto # options: auto, gvisor, mips; auto uses gVisor when compiled in and mihomo IP stack (MIPS) otherwise
-    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, or bbr; ignored by gVisor
+    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, bbr, or bbr3; ignored by gVisor
     # primary-port: 0 # primary UDP port; 0 selects an available port
     # secondary-port: 0 # second UDP port; 0 selects an available port, -1 disables it
     # tcp-fallback-mode: auto # auto uses relay after UDP failure; force uses relay only; disable turns relay off
@@ -1386,6 +1390,48 @@ proxies: # socks5
     # remote-dns-resolve: true # resolve destination names through ZeroTier using controller-provided DNS servers
     # dns: [10.147.17.1] # optional override for controller-provided DNS servers
     # dialer-proxy: "ss1" # carry ZeroTier wire traffic through another outbound
+    # interface-name: "WLAN"
+    # routing-mark: 6666
+    # ip-version: ipv4-prefer
+
+  # easytier
+  # overlay 仅支持 IPv4；ip-version 只影响底层 peer 连接，不启用 overlay IPv6
+  - name: "easytier"
+    type: easytier
+    network-name: example
+    network-secret: secret
+    # hostname: mihomo
+    # ipv4: 10.144.0.1/24
+    # dhcp: true # ipv4 为空时默认开启，否则实例没有 overlay IPv4
+    peers: # 可配置多个入口；默认不隐式连接 public.easytier.top；无 listeners 时至少填一个
+      - tcp://192.0.2.10:11010
+      - udp://192.0.2.11:11010
+      # - "tcp://relay.example.com:11010?peer-public-key=base64-x25519-public-key" # 锁定共享节点公钥，防止中间人
+    # secure-mode: true # Noise E2EE；配置 local-*-key 或 peer URI 中的 peer-public-key 时会自动开启
+    # local-private-key: "base64-x25519-private-key" # 可选，固定本机身份，避免每次启动更换公钥
+    # local-public-key: "base64-x25519-public-key" # 可选，通常可由私钥派生
+    # listeners: ["tcp://0.0.0.0:11010"]
+    # no-listener: true # 默认 true，listeners 为空
+    # mapped-listeners: ["tcp://203.0.113.10:11010"]
+    # exit-nodes: ["10.144.0.1"]
+    # proxy-networks: ["10.0.0.0/24"]
+    # instance-name: mihomo-easytier
+    # state-dir: ./easytier # 默认 easytier/<name>，用于持久化 instance_id
+    udp: true
+    # accept-dns: false
+    # enable-exit-node: false
+    # enable-encryption: true
+    # encryption-algorithm: aes-gcm
+    # private-mode: false
+    # latency-first: false
+    # disable-p2p: false
+    # enable-kcp-proxy: false
+    # disable-kcp-input: false
+    # enable-quic-proxy: false
+    # disable-quic-input: false
+    # mtu: 1380
+    # tld-dns-zone: et.net.
+    # dialer-proxy: "ss1"
     # interface-name: "WLAN"
     # routing-mark: 6666
     # ip-version: ipv4-prefer
@@ -1443,12 +1489,13 @@ proxies: # socks5
     #   UV_DEVICE_ID: "laptop-001"
     # ping: 10 # 默认值为 0
     # ping-restart: 60 # 默认值为 0
+    # tran-window: 3600 # 旧 data key 在 rekey 后保留的秒数；默认 3600，显式设为 0 表示立即过期，应与服务端 --tran-window 对齐
     # handshake-timeout: 30 # 单位为秒；配置后握手时不受外层连接超时影响；默认值为 0，表示仅使用外层连接超时
     # mtu: 1500
     udp: true
     # ip-stack:
     #   mode: auto # options: auto, gvisor, mips; auto uses gVisor when compiled in and mihomo IP stack (MIPS) otherwise
-    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, or bbr; ignored by gVisor
+    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, bbr, or bbr3; ignored by gVisor
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出连接
     # dialer-proxy: "ss1"
     # remote-dns-resolve: true # 强制 dns 远程解析，默认值为 false
@@ -1467,7 +1514,7 @@ proxies: # socks5
     udp: true
     # ip-stack:
     #   mode: auto # options: auto, gvisor, mips; auto uses gVisor when compiled in and mihomo IP stack (MIPS) otherwise
-    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, or bbr; ignored by gVisor
+    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, bbr, or bbr3; ignored by gVisor
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出连接
     # dialer-proxy: "ss1"
     # remote-dns-resolve: true # 强制 dns 远程解析，默认值为 false
@@ -1505,7 +1552,7 @@ proxies: # socks5
     network: h2
     # ip-stack:
     #   mode: auto # options: auto, gvisor, mips; auto uses gVisor when compiled in and mihomo IP stack (MIPS) otherwise
-    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, or bbr; ignored by gVisor
+    #   congestion-controller: cubic # TCP congestion controller: cubic, reno, bbr, or bbr3; ignored by gVisor
     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出连接
     # dialer-proxy: "ss1"
     # remote-dns-resolve: true # 强制 dns 远程解析，默认值为 false
@@ -1600,7 +1647,7 @@ proxies: # socks5
     port: 22
     username: root
     password: password
-    privateKey: path
+    private-key: path
 
   # mieru
   - name: mieru
@@ -1650,6 +1697,7 @@ proxies: # socks5
     password: "<your password>"
     # client-fingerprint: chrome
     udp: true
+    # client-metadata: "" # 发送给服务端的客户端元数据，由于这可能被用于统计客户端信息并区别对待，从v1.19.30开始默认再不发送该内容，如果需要请自行填写
     # idle-session-check-interval: 30 # seconds
     # idle-session-timeout: 30 # seconds
     # min-idle-session: 0
@@ -2740,7 +2788,7 @@ listeners:
     type: tun
     # rule: sub-rule-name1 # 默认使用 rules，如果未找到 sub-rule 则直接使用 rules
     # proxy: proxy # 如果不为空则直接将该入站流量交由指定 proxy 处理 (当 proxy 不为空时，这里的 proxy 名称必须合法，否则会出错)
-    stack: system # gvisor / mixed
+    stack: system # gvisor / mixed / mips
     dns-hijack:
     - 0.0.0.0:53 # 需要劫持的 DNS
     # auto-detect-interface: false # 自动识别出口网卡

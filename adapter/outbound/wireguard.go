@@ -136,6 +136,8 @@ type AmneziaWGOption struct {
 	RejectAfterTime        string `proxy:"reject-after-time,omitempty"`
 	KeepaliveTimeout       string `proxy:"keepalive-timeout,omitempty"`
 	MaxHandshakeAttempts   string `proxy:"max-handshake-attempts,omitempty"`
+	RandomTrailers         bool   `proxy:"random-trailers,omitempty"` // AmneziaWG v3.1+
+	DisableCookies         bool   `proxy:"disable-cookies,omitempty"` // AmneziaWG v3.1+
 }
 
 type IPStackOption struct {
@@ -161,11 +163,11 @@ func (o IPStackOption) validate() error {
 	default:
 		return fmt.Errorf("invalid IP stack mode %q; expected auto, gvisor, or mips", o.Mode)
 	}
-	switch mipstack.CongestionControl(o.CongestionController) {
-	case "", mipstack.CongestionControlCUBIC, mipstack.CongestionControlReno, mipstack.CongestionControlBBR:
+	switch o.CongestionController {
+	case "", mipstack.CongestionControlCUBIC, mipstack.CongestionControlReno, mipstack.CongestionControlBBR, mipstack.CongestionControlBBR3:
 		return nil
 	default:
-		return fmt.Errorf("invalid IP stack congestion controller %q; expected cubic, reno, or bbr", o.CongestionController)
+		return fmt.Errorf("invalid IP stack congestion controller %q; expected cubic, reno, bbr, or bbr3", o.CongestionController)
 	}
 }
 
@@ -175,7 +177,10 @@ type ipStack interface {
 	Start() error
 	DialTCP(ctx context.Context, network string, source, destination netip.AddrPort) (net.Conn, error)
 	DialUDP(ctx context.Context, network string, source, destination netip.AddrPort) (net.Conn, error)
+	DialIP(ctx context.Context, network string, source, destination netip.Addr) (net.Conn, error)
+	ListenTCP(ctx context.Context, network string, local netip.AddrPort) (net.Listener, error)
 	ListenUDP(ctx context.Context, network string, local netip.AddrPort) (net.PacketConn, error)
+	ListenIP(ctx context.Context, network string, local netip.Addr) (net.PacketConn, error)
 	Read(buffers [][]byte, sizes []int, offset int) (int, error)
 	Write(buffers [][]byte, offset int) (int, error)
 	MTU() (int, error)
@@ -202,13 +207,18 @@ func newIPStack(option IPStackOption, localAddresses []netip.Prefix, mtu uint32)
 			LocalAddresses: localAddresses,
 			MTU:            mtu,
 			TCP: mipstack.TCPSocketDefaults{
-				CongestionControl: mipstack.CongestionControl(option.CongestionController),
+				CongestionControl: option.CongestionController,
 				// Align with sing-wireguard: enable keepalive with 15-second
 				// idle/interval timing and gVisor's default probe count.
 				KeepAlive: true,
 				KeepAliveConfig: mipstack.KeepAliveConfig{
 					Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 9,
 				},
+			},
+			IP: mipstack.IPSocketDefaults{
+				// Align with sing-wireguard: fellow its IP socket semantics
+				IPHeaderIncludedOnRead:  true,
+				IPHeaderIncludedOnWrite: true,
 			},
 		})
 	default:
@@ -375,6 +385,10 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 		}
 	}
 	outbound.bind = wireguard.NewClientBind(context.Background(), wgSingErrorHandler{outbound.Name()}, singDialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
+
+	if outbound.bind == nil {
+		return nil, E.New("failed to create wireguard client bind")
+	}
 
 	var err error
 	outbound.localPrefixes, err = option.Prefixes()
@@ -677,6 +691,12 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 			}
 			if w.option.AmneziaWGOption.MaxHandshakeAttempts != "" {
 				ipcConf += "max_handshake_attempts=" + w.option.AmneziaWGOption.MaxHandshakeAttempts + "\n"
+			}
+			if w.option.AmneziaWGOption.RandomTrailers {
+				ipcConf += "random_trailers=1\n"
+			}
+			if w.option.AmneziaWGOption.DisableCookies {
+				ipcConf += "disable_cookies=1\n"
 			}
 		}
 	}
